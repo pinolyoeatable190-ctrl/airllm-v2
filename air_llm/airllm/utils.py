@@ -217,18 +217,49 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None,
     with open(checkpoint_path / index_file, 'rb') as f:
         index = json.load(f)['weight_map']
 
-    # Count layers
+    # Count layers (robust across variants such as model.layers.0.* and model.layers.layers.0.*)
     prefix = layer_names['layer_prefix'] if layer_names else 'model.layers'
-    n_layers = len(set(
-        int(k[len(prefix):].split('.')[1] if layer_names else k.split('.')[2])
-        for k in index if prefix in k
-    ))
+    layer_ids = set()
+    layer_infix_counts = defaultdict(int)
+    for k in index:
+        if prefix not in k:
+            continue
+
+        if layer_names:
+            if not k.startswith(prefix):
+                continue
+            remainder = k[len(prefix):].lstrip('.')
+            parts = [p for p in remainder.split('.') if p]
+            layer_id = None
+            for j, part in enumerate(parts):
+                if part.isdigit():
+                    layer_id = int(part)
+                    layer_infix_counts['.'.join(parts[:j])] += 1
+                    break
+        else:
+            parts = k.split('.')
+            layer_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+
+        if layer_id is not None:
+            layer_ids.add(layer_id)
+
+    if not layer_ids:
+        sample = next(iter(index.keys())) if index else '<empty-index>'
+        raise ValueError(
+            f"Unable to infer transformer layer ids for prefix '{prefix}'. Sample key: {sample}"
+        )
+
+    n_layers = max(layer_ids) + 1
+    layer_infix = ''
+    if layer_names and layer_infix_counts:
+        layer_infix = max(layer_infix_counts.items(), key=lambda x: x[1])[0]
 
     # Build layer list
     if layer_names is None:
         layers = ['model.embed_tokens.'] + [f'model.layers.{i}.' for i in range(n_layers)] + ['model.norm.', 'lm_head.']
     else:
-        layers = [layer_names['embed']] + [f'{layer_names["layer_prefix"]}.{i}' for i in range(n_layers)] + [layer_names['norm'], layer_names['lm_head']]
+        infix = f'.{layer_infix}' if layer_infix else ''
+        layers = [layer_names['embed']] + [f'{layer_names["layer_prefix"]}{infix}.{i}' for i in range(n_layers)] + [layer_names['norm'], layer_names['lm_head']]
         if 'rotary_pos_emb' in layer_names:
             layers = [layer_names['rotary_pos_emb']] + layers
         layers = [l + "." for l in layers]
