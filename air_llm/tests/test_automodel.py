@@ -1,21 +1,25 @@
 import sys
 import unittest
 
-from ..airllm.auto_model import AutoModel
+sys.path.insert(0, "../airllm")
+
+from airllm.auto_model import _apply_profile_defaults
+
+
 
 
 class TestAutoModel(unittest.TestCase):
-    def test_auto_model_should_return_correct_model(self):
-        mapping_dict = {
-            'garage-bAInd/Platypus2-7B': 'AirLLMLlama2',
-            'Qwen/Qwen-7B': 'AirLLMQWen',
-            'internlm/internlm-chat-7b': 'AirLLMInternLM',
-            'THUDM/chatglm3-6b-base': 'AirLLMChatGLM',
-            'baichuan-inc/Baichuan2-7B-Base': 'AirLLMBaichuan',
-            'mistralai/Mistral-7B-Instruct-v0.1': 'AirLLMMistral',
-            'mistralai/Mixtral-8x7B-v0.1': 'AirLLMMixtral',
+    def test_profile_defaults_should_not_override_explicit_values(self):
+        kwargs = {
+            'deployment_profile': 'rpi5_8gb_sd',
+            'device': 'cpu',
+            'prefetching': True,
         }
+        out = _apply_profile_defaults(kwargs)
+        self.assertEqual(out['device'], 'cpu')
+        self.assertTrue(out['prefetching'])
+        self.assertEqual(out['prefetch_window'], 1)
 
-        for k, v in mapping_dict.items():
-            module, cls = AutoModel.get_module_class(k)
-            self.assertEqual(cls, v, f"expecting {v}")
+    def test_unknown_profile_should_raise(self):
+        with self.assertRaises(ValueError):
+            _apply_profile_defaults({'deployment_profile': 'unknown'})

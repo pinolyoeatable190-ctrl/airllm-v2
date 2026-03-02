@@ -88,15 +88,11 @@ Ce profil applique automatiquement des valeurs orientees faible RAM/I/O SD : CPU
 air_llm/
   airllm/
     airllm_base.py         # Moteur d'inference principal (sharded layer-by-layer)
-    airllm_variants.py     # Llama2, Mistral, Mixtral, InternLM, QWen2 (consolide)
-    airllm_qwen.py         # QWen v1 (logique specialisee)
-    airllm_chatglm.py      # ChatGLM (logique specialisee)
-    airllm_baichuan.py     # Baichuan (tokenizer specifique)
-    airllm_llama_mlx.py    # Backend MLX (macOS Apple Silicon)
-    auto_model.py           # Detection auto d'architecture + registry
+    airllm_base.py         # Moteur d'inference universel (layer-wise)
+    airllm_llama_mlx.py     # Backend MLX (macOS Apple Silicon)
+    auto_model.py           # Auto-routage universel vers moteur generique
     utils.py                # Splitting, compression, I/O
     profiler.py             # Profiling par couche
-    tokenization_baichuan.py
     persist/                # Persistance (safetensors / MLX)
   examples/
   tests/
