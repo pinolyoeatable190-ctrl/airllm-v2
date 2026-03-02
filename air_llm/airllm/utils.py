@@ -16,6 +16,7 @@ from sys import platform
 
 import torch
 from safetensors.torch import load_file, save_file
+from safetensors import safe_open
 
 from .persist import ModelPersister
 
@@ -275,62 +276,58 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None,
 
     saving_path.mkdir(parents=True, exist_ok=True)
 
-    shard = 0
-    n_shards = len(set(index.values()))
-    state_dict = {}
-    single_modelfile = None
+    # Precompute which tensors/files are needed per layer.
+    layer_to_keys = {layer: [k for k in index if k.startswith(layer)] for layer in layers}
+    layer_to_files = {layer: sorted(set(index[k] for k in keys)) for layer, keys in layer_to_keys.items()}
+
+    # Deletion safety: only remove original files once every dependent layer is persisted.
+    file_refcount = defaultdict(int)
+    for files in layer_to_files.values():
+        for f in files:
+            file_refcount[f] += 1
+
+    last_loaded_bin = None
+    last_bin_state_dict = None
 
     for layer in tqdm(layers):
-        shards = [int(v.split('-')[1]) for k, v in index.items()
-                   if k.startswith(layer) and '-' in v and len(v.split('-')) > 1]
+        keys = layer_to_keys[layer]
+        files = layer_to_files[layer]
+        layer_sd = {}
 
-        if shards:
-            if max(shards) > shard:
-                if delete_original and shard != 0:
-                    ext = 'safetensors' if safetensors_format else 'bin'
-                    prefix_name = 'model' if safetensors_format else 'pytorch_model'
-                    _remove_file_and_target(
-                        checkpoint_path / f'{prefix_name}-000{shard:02d}-of-000{n_shards:02d}.{ext}'
-                    )
-                shard += 1
-
-                ext = 'safetensors' if safetensors_format else 'bin'
-                prefix_name = 'model' if safetensors_format else 'pytorch_model'
-                to_load = checkpoint_path / f'{prefix_name}-000{shard:02d}-of-000{n_shards:02d}.{ext}'
-
-                if not os.path.exists(to_load):
-                    assert repo_id is not None
-                    huggingface_hub.snapshot_download(repo_id, allow_patterns=os.path.basename(to_load), token=hf_token)
-
-                if safetensors_format:
-                    state_dict.update(load_file(to_load, device='cpu'))
-                else:
-                    state_dict.update(torch.load(to_load, map_location='cpu'))
-        else:
-            file_list = [v for k, v in index.items() if k.startswith(layer)]
-            single_modelfile = file_list[0]
-            to_load = checkpoint_path / single_modelfile
+        for filename in files:
+            to_load = checkpoint_path / filename
             if not os.path.exists(to_load):
                 assert repo_id is not None
                 huggingface_hub.snapshot_download(repo_id, allow_patterns=os.path.basename(to_load), token=hf_token)
-            if safetensors_format:
-                state_dict.update(load_file(to_load, device='cpu'))
-            else:
-                state_dict.update(torch.load(to_load, map_location='cpu'))
 
-        layer_sd = {k: v for k, v in state_dict.items() if k.startswith(layer)}
+            needed_keys = [k for k in keys if index[k] == filename]
+            if safetensors_format:
+                with safe_open(str(to_load), framework='pt', device='cpu') as sf:
+                    for k in needed_keys:
+                        layer_sd[k] = sf.get_tensor(k)
+            else:
+                if last_loaded_bin != filename:
+                    last_bin_state_dict = torch.load(to_load, map_location='cpu')
+                    last_loaded_bin = filename
+                for k in needed_keys:
+                    layer_sd[k] = last_bin_state_dict[k]
+
         layer_sd = compress_layer_state_dict(layer_sd, compression)
 
         if not ModelPersister.get_model_persister().model_persist_exist(layer, saving_path):
             ModelPersister.get_model_persister().persist_model(layer_sd, layer, saving_path)
 
-        for k in layer_sd:
-            state_dict.pop(k, None)
+        if delete_original:
+            for filename in files:
+                file_refcount[filename] -= 1
+                if file_refcount[filename] == 0:
+                    _remove_file_and_target(checkpoint_path / filename)
+                    if last_loaded_bin == filename:
+                        last_loaded_bin = None
+                        last_bin_state_dict = None
+
         del layer_sd
         clean_memory()
-
-    if delete_original and single_modelfile is not None:
-        _remove_file_and_target(checkpoint_path / single_modelfile)
 
     return str(saving_path)
 
