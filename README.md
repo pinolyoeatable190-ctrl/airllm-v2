@@ -63,6 +63,22 @@ model = AutoModel.from_pretrained(
 )
 ```
 
+
+## Profil Raspberry Pi 5 (8GB, CPU + SD)
+
+Pour un usage contraint (sans GPU), utilisez le profil preconfigure :
+
+```python
+from airllm import AutoModel
+
+model = AutoModel.from_pretrained(
+    "meta-llama/Llama-3.1-8B-Instruct",
+    deployment_profile="rpi5_8gb_sd",
+)
+```
+
+Ce profil applique automatiquement des valeurs orientees faible RAM/I/O SD : CPU mode, prefetch desactive, cache couche limite, nettoyage memoire plus espace, et barres de progression desactivees.
+
 ## Structure du repository
 
 ```

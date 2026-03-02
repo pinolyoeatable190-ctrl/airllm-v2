@@ -144,6 +144,9 @@ class AirLLMBaseModel(GenerationMixin):
         prefetch_window=2,
         cleanup_interval=8,
         cleanup_memory_pressure=0.90,
+        cpu_thread_count=None,
+        cpu_interop_threads=None,
+        disable_progress_bar=None,
     ):
         _configure_runtime_once()
 
@@ -180,10 +183,20 @@ class AirLLMBaseModel(GenerationMixin):
             delete_original=delete_original,
         )
 
+        if isinstance(device, str) and device.startswith("cuda") and (not torch.cuda.is_available()):
+            print("CUDA device requested but unavailable; falling back to CPU.")
+            device = "cpu"
+
         self.running_device = device
         self.device = torch.device(device)
         self.running_dtype = dtype
         self.dtype = dtype
+
+        if self.device.type == "cpu":
+            if cpu_thread_count is not None:
+                torch.set_num_threads(max(1, int(cpu_thread_count)))
+            if cpu_interop_threads is not None and hasattr(torch, "set_num_interop_threads"):
+                torch.set_num_interop_threads(max(1, int(cpu_interop_threads)))
 
         kw = {"token": hf_token} if hf_token else {}
         self.config = AutoConfig.from_pretrained(
@@ -210,6 +223,11 @@ class AirLLMBaseModel(GenerationMixin):
         self.prefetching = prefetching
         if self.compression is not None:
             self.prefetching = False
+
+        if disable_progress_bar is None:
+            self.disable_progress_bar = self.device.type == "cpu"
+        else:
+            self.disable_progress_bar = bool(disable_progress_bar)
 
         self.stream = (
             torch.cuda.Stream()
@@ -545,6 +563,7 @@ class AirLLMBaseModel(GenerationMixin):
                     enumerate(zip(self.layer_names, self.layers)),
                     desc=f'running layers({self.running_device})',
                     total=len(self.layers),
+                    disable=self.disable_progress_bar,
                 ):
                     future = futures.pop(i, None)
                     moved = self._load_and_move(layer_name, executor, future)
@@ -586,6 +605,7 @@ class AirLLMBaseModel(GenerationMixin):
                     enumerate(zip(self.layer_names, self.layers)),
                     desc=f'running layers({self.running_device})',
                     total=len(self.layers),
+                    disable=self.disable_progress_bar,
                 ):
                     moved = self._load_and_move(layer_name, executor=None, future_ref=None)
 

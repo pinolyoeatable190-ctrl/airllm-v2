@@ -23,6 +23,33 @@ _ARCH_REGISTRY = {
 _DEFAULT_MODULE = "airllm.airllm_variants"
 _DEFAULT_CLASS  = "AirLLMLlama2"
 
+def _apply_profile_defaults(kwargs):
+    """Apply optional deployment profiles without overriding explicit user args."""
+    profile = kwargs.pop("deployment_profile", None)
+    if profile is None:
+        return kwargs
+
+    if profile == "rpi5_8gb_sd":
+        defaults = {
+            "device": "cpu",
+            "dtype": None,
+            "prefetching": False,
+            "prefetch_window": 1,
+            "layer_cache_size": 1,
+            "cleanup_interval": 16,
+            "cleanup_memory_pressure": 0.97,
+            "rebuild_model_per_forward": False,
+            "cpu_thread_count": 4,
+            "cpu_interop_threads": 1,
+            "disable_progress_bar": True,
+        }
+        for k, v in defaults.items():
+            kwargs.setdefault(k, v)
+        return kwargs
+
+    raise ValueError(f"Unknown deployment_profile: {profile}")
+
+
 
 class AutoModel:
     def __init__(self):
@@ -48,6 +75,8 @@ class AutoModel:
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *inputs, **kwargs):
+        kwargs = _apply_profile_defaults(kwargs)
+
         if is_on_mac_os:
             return AirLLMLlamaMlx(pretrained_model_name_or_path, *inputs, **kwargs)
 
