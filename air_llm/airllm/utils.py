@@ -161,8 +161,8 @@ def compress_layer_state_dict(layer_state_dict, compression=None):
     """Quantize a layer state dict to 4-bit or 8-bit."""
     if compression == '4bit':
         out = {}
+        bnb_mod = _get_bnb()
         for k, v in layer_state_dict.items():
-            bnb_mod = _get_bnb()
             v_quant, quant_state = bnb_mod.functional.quantize_nf4(v.cuda(), blocksize=64)
             out[k] = v_quant
             for qs_k, qs_v in save_quant_state_to_dict(quant_state).items():
@@ -171,8 +171,8 @@ def compress_layer_state_dict(layer_state_dict, compression=None):
 
     if compression == '8bit':
         out = {}
+        bnb_mod = _get_bnb()
         for k, v in layer_state_dict.items():
-            bnb_mod = _get_bnb()
             v_quant, quant_state = bnb_mod.functional.quantize_blockwise(v.cuda(), blocksize=2048)
             out[k] = v_quant
             out[f"{k}.8bit.absmax"] = quant_state.absmax.clone().contiguous()
@@ -336,14 +336,20 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None,
 
 
 
-def infer_layer_names_dict(model_local_path_or_repo_id, hf_token=None):
-    """Infer common layer naming layout from checkpoint index without model-specific registry."""
+
+def infer_layer_layout_and_checkpoint(model_local_path_or_repo_id, hf_token=None):
+    """Infer layer naming layout and return resolved local checkpoint path.
+
+    Returns:
+        tuple(Path, dict): (local_checkpoint_path, layer_names_dict)
+    """
     p = Path(model_local_path_or_repo_id)
     if os.path.exists(p):
         checkpoint_path = p
     else:
         checkpoint_path = Path(huggingface_hub.snapshot_download(
-            model_local_path_or_repo_id, token=hf_token,
+            model_local_path_or_repo_id,
+            token=hf_token,
             ignore_patterns=['*.safetensors', '*.bin'],
         ))
 
@@ -352,7 +358,7 @@ def infer_layer_names_dict(model_local_path_or_repo_id, hf_token=None):
     elif os.path.exists(checkpoint_path / 'pytorch_model.bin.index.json'):
         index_file = checkpoint_path / 'pytorch_model.bin.index.json'
     else:
-        return {
+        return checkpoint_path, {
             'embed': 'model.embed_tokens',
             'layer_prefix': 'model.layers',
             'norm': 'model.norm',
@@ -379,12 +385,18 @@ def infer_layer_names_dict(model_local_path_or_repo_id, hf_token=None):
 
     lm_head = 'lm_head' if any(k.startswith('lm_head.') for k in keys) else 'model.lm_head'
 
-    return {
+    return checkpoint_path, {
         'embed': embed,
         'layer_prefix': layer_prefix,
         'norm': norm,
         'lm_head': lm_head,
     }
+
+
+def infer_layer_names_dict(model_local_path_or_repo_id, hf_token=None):
+    """Backward-compatible wrapper returning only layer names."""
+    _, layer_names = infer_layer_layout_and_checkpoint(model_local_path_or_repo_id, hf_token=hf_token)
+    return layer_names
 
 def find_or_create_local_splitted_path(model_local_path_or_repo_id, layer_shards_saving_path=None,
                                        compression=None, layer_names=None, hf_token=None,
