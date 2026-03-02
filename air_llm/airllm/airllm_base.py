@@ -143,6 +143,7 @@ class AirLLMBaseModel(GenerationMixin):
         rebuild_model_per_forward=False,
         prefetch_window=2,
         cleanup_interval=8,
+        cleanup_memory_pressure=0.90,
     ):
         _configure_runtime_once()
 
@@ -158,6 +159,7 @@ class AirLLMBaseModel(GenerationMixin):
         self.prefetch_window = max(1, int(prefetch_window))
         # Run allocator cleanup periodically instead of at every layer for better throughput.
         self.cleanup_interval = max(1, int(cleanup_interval))
+        self.cleanup_memory_pressure = float(cleanup_memory_pressure)
 
         if compression is not None and not bitsandbytes_installed:
             raise ImportError(
@@ -403,9 +405,16 @@ class AirLLMBaseModel(GenerationMixin):
     # -- Forward pass -------------------------------------------------------
 
     def _maybe_clean_memory(self, layer_idx, is_last):
-        """Periodic memory cleanup to preserve layer-wise semantics with lower overhead."""
+        """Periodic/adaptive cleanup: keep layer-wise VRAM safety with less overhead."""
         if is_last or ((layer_idx + 1) % self.cleanup_interval == 0):
             clean_memory()
+            return
+
+        if torch.cuda.is_available() and self.running_device.startswith("cuda"):
+            free, total = torch.cuda.mem_get_info(self.running_device)
+            used_ratio = 1.0 - (free / total)
+            if used_ratio >= self.cleanup_memory_pressure:
+                clean_memory()
 
     def _load_and_move(self, layer_name, executor, future_ref):
         """Load a layer's weights (prefetch-aware) and move them to device.
@@ -510,7 +519,11 @@ class AirLLMBaseModel(GenerationMixin):
             clean_memory()
             self.init_model()
 
-        batch = [uid.to(self.running_device, non_blocking=True).unsqueeze(0) for uid in input_ids]
+        # Vectorized batch path: avoid per-sample Python loops on every layer.
+        if isinstance(input_ids, torch.Tensor):
+            batch = input_ids.to(self.running_device, non_blocking=True)
+        else:
+            batch = torch.stack([uid for uid in input_ids], dim=0).to(self.running_device, non_blocking=True)
 
         attention_mask, position_ids = self._get_full_attention_mask_and_position_ids()
 
@@ -520,24 +533,23 @@ class AirLLMBaseModel(GenerationMixin):
 
         lnd = self.layer_names_dict
 
-        max_workers = self.prefetch_window if self.prefetching else 1
-        with torch.inference_mode(), ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            if self.prefetching:
+        if self.prefetching:
+            max_workers = self.prefetch_window
+            with torch.inference_mode(), ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {}
                 warmup = min(len(self.layer_names), self.prefetch_window)
                 for idx in range(warmup):
                     futures[idx] = executor.submit(self.load_layer_to_cpu, self.layer_names[idx])
 
-            for i, (layer_name, layer) in tqdm(
-                enumerate(zip(self.layer_names, self.layers)),
-                desc=f'running layers({self.running_device})',
-                total=len(self.layers),
-            ):
-                future = futures.pop(i, None) if self.prefetching else None
-                moved = self._load_and_move(layer_name, executor, future)
+                for i, (layer_name, layer) in tqdm(
+                    enumerate(zip(self.layer_names, self.layers)),
+                    desc=f'running layers({self.running_device})',
+                    total=len(self.layers),
+                ):
+                    future = futures.pop(i, None)
+                    moved = self._load_and_move(layer_name, executor, future)
 
-                # Keep a small rolling prefetch window to overlap disk IO/decompression.
-                if self.prefetching:
+                    # Keep a small rolling prefetch window to overlap disk IO/decompression.
                     next_i = i + self.prefetch_window
                     if next_i < len(self.layer_names) and next_i not in futures:
                         if self.profiling_mode:
@@ -546,32 +558,60 @@ class AirLLMBaseModel(GenerationMixin):
                         if self.profiling_mode:
                             self.profiler.add_profiling_time('kick_off_load_cpu', time.time() - t)
 
-                # Execute layer on each sequence in the batch
-                for j, seq in enumerate(batch):
                     if layer_name == lnd['embed']:
-                        batch[j] = layer(seq)
+                        batch = layer(batch)
                     elif layer_name == lnd['norm']:
-                        batch[j] = self.run_norm(layer, seq)
+                        batch = self.run_norm(layer, batch)
                     elif layer_name == lnd['lm_head']:
-                        batch[j] = self.run_lm_head(layer, seq)
+                        batch = self.run_lm_head(layer, batch)
                     else:
-                        batch[j] = self._run_transformer_layer(
-                            layer, seq, i, attention_mask, position_ids,
+                        batch = self._run_transformer_layer(
+                            layer, batch, i, attention_mask, position_ids,
                             past_key_values, use_cache, kv_cache_list,
                             output_attentions, all_self_attns,
                         )
 
-                if output_hidden_states:
-                    all_hidden_states.append(torch.cat(batch, 0))
+                    if output_hidden_states:
+                        all_hidden_states.append(batch)
 
-                # Off-load layer to free VRAM
-                if self.hf_quantizer is not None:
-                    for pn in moved:
-                        set_module_tensor_to_device(self.model, pn, 'meta')
-                layer.to("meta")
-                self._maybe_clean_memory(i, is_last=(i + 1 == len(self.layers)))
+                    # Off-load layer to free VRAM
+                    if self.hf_quantizer is not None:
+                        for pn in moved:
+                            set_module_tensor_to_device(self.model, pn, 'meta')
+                    layer.to("meta")
+                    self._maybe_clean_memory(i, is_last=(i + 1 == len(self.layers)))
+        else:
+            with torch.inference_mode():
+                for i, (layer_name, layer) in tqdm(
+                    enumerate(zip(self.layer_names, self.layers)),
+                    desc=f'running layers({self.running_device})',
+                    total=len(self.layers),
+                ):
+                    moved = self._load_and_move(layer_name, executor=None, future_ref=None)
 
-        logits = torch.cat(batch, 0)
+                    if layer_name == lnd['embed']:
+                        batch = layer(batch)
+                    elif layer_name == lnd['norm']:
+                        batch = self.run_norm(layer, batch)
+                    elif layer_name == lnd['lm_head']:
+                        batch = self.run_lm_head(layer, batch)
+                    else:
+                        batch = self._run_transformer_layer(
+                            layer, batch, i, attention_mask, position_ids,
+                            past_key_values, use_cache, kv_cache_list,
+                            output_attentions, all_self_attns,
+                        )
+
+                    if output_hidden_states:
+                        all_hidden_states.append(batch)
+
+                    if self.hf_quantizer is not None:
+                        for pn in moved:
+                            set_module_tensor_to_device(self.model, pn, 'meta')
+                    layer.to("meta")
+                    self._maybe_clean_memory(i, is_last=(i + 1 == len(self.layers)))
+
+        logits = batch
 
         if use_cache:
             kv_cache_list = [
