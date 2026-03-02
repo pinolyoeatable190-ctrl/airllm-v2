@@ -4,6 +4,7 @@ import gc
 import json
 import os
 import ctypes
+import zlib
 import shutil
 from tqdm import tqdm
 from pathlib import Path
@@ -78,6 +79,30 @@ def uncompress_layer_state_dict(layer_state_dict):
     """Decompress a 4-bit or 8-bit quantized layer state dict back to float16."""
     keys = list(layer_state_dict.keys())
 
+    if any(k.endswith('.lossless.data') for k in keys):
+        dtype_from_code = {
+            1: torch.float16,
+            2: torch.bfloat16,
+            3: torch.float32,
+            4: torch.int8,
+            5: torch.uint8,
+            6: torch.int16,
+            7: torch.int32,
+            8: torch.int64,
+        }
+        out = {}
+        for k in keys:
+            if not k.endswith('.lossless.data'):
+                continue
+            base = k[:-len('.lossless.data')]
+            compressed = layer_state_dict[k].contiguous().numpy().tobytes()
+            raw = zlib.decompress(compressed)
+            dtype_code = int(layer_state_dict[f'{base}.lossless.dtype'].item())
+            dtype = dtype_from_code[dtype_code]
+            shape = tuple(int(x) for x in layer_state_dict[f'{base}.lossless.shape'].tolist())
+            out[base] = torch.frombuffer(bytearray(raw), dtype=dtype).clone().reshape(shape)
+        return out
+
     if any('4bit' in k for k in keys):
         out = {}
         for k, v in layer_state_dict.items():
@@ -150,6 +175,29 @@ def check_space(checkpoint_path, layer_shards_saving_path=None, compression=None
 
 def compress_layer_state_dict(layer_state_dict, compression=None):
     """Quantize a layer state dict to 4-bit or 8-bit."""
+    if compression == 'lossless':
+        dtype_to_code = {
+            torch.float16: 1,
+            torch.bfloat16: 2,
+            torch.float32: 3,
+            torch.int8: 4,
+            torch.uint8: 5,
+            torch.int16: 6,
+            torch.int32: 7,
+            torch.int64: 8,
+        }
+        out = {}
+        for k, v in layer_state_dict.items():
+            cpu_tensor = v.detach().cpu().contiguous()
+            dtype_code = dtype_to_code.get(cpu_tensor.dtype)
+            if dtype_code is None:
+                raise ValueError(f'Unsupported dtype for lossless compression: {cpu_tensor.dtype}')
+            compressed = zlib.compress(cpu_tensor.numpy().tobytes(), level=1)
+            out[f'{k}.lossless.data'] = torch.tensor(list(compressed), dtype=torch.uint8)
+            out[f'{k}.lossless.shape'] = torch.tensor(list(cpu_tensor.shape), dtype=torch.int32)
+            out[f'{k}.lossless.dtype'] = torch.tensor([dtype_code], dtype=torch.int16)
+        return out
+
     if compression == '4bit':
         out = {}
         for k, v in layer_state_dict.items():
@@ -185,7 +233,7 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None,
                           delete_original=False, repo_id=None, hf_token=None):
     """Split a sharded model checkpoint into per-layer safetensor files."""
     if compression is not None:
-        assert bitsandbytes_installed, "bitsandbytes is required for compression."
+        assert compression == 'lossless' or bitsandbytes_installed, "bitsandbytes is required for 4bit/8bit compression."
         splitted_model_dir_name = f"{splitted_model_dir_name}.{compression}"
 
     checkpoint_path = Path(checkpoint_path)

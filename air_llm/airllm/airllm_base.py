@@ -152,9 +152,9 @@ class AirLLMBaseModel(GenerationMixin):
         self._cached_attention_mask = None
         self._cached_position_ids = None
 
-        if compression is not None and not bitsandbytes_installed:
+        if compression in {'4bit', '8bit'} and not bitsandbytes_installed:
             raise ImportError(
-                "bitsandbytes is required for compression. "
+                "bitsandbytes is required for 4bit/8bit compression. "
                 "Install it with: pip install bitsandbytes"
             )
 
