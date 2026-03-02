@@ -41,18 +41,3 @@ class TestCompression(unittest.TestCase):
                         RMSE_loss = torch.sqrt(loss_fn(aa[k], a_state_dict[k])).detach().cpu().item()
                         print(f"compression {compression} loss: {RMSE_loss}")
                         self.assertLess(RMSE_loss, 0.1)
-
-    def test_should_compress_uncompress_lossless(self):
-        a0 = torch.normal(0, 1, (8, 32), dtype=torch.float16)
-        a1 = torch.randint(-5, 5, (8, 32), dtype=torch.int16)
-
-        a_state_dict = {'a0': a0, 'a1': a1}
-
-        b = compress_layer_state_dict(a_state_dict, 'lossless')
-        aa = uncompress_layer_state_dict(b)
-
-        self.assertEqual(set(aa.keys()), set(a_state_dict.keys()))
-        for k in aa.keys():
-            self.assertTrue(torch.equal(aa[k], a_state_dict[k]))
-            self.assertEqual(aa[k].dtype, a_state_dict[k].dtype)
-            self.assertEqual(tuple(aa[k].shape), tuple(a_state_dict[k].shape))

@@ -20,4 +20,3 @@ else:
     from .auto_model import AutoModel
     from .utils import split_and_save_layers
     from .utils import NotEnoughSpaceException
-    from .utils import compress_layer_state_dict, uncompress_layer_state_dict

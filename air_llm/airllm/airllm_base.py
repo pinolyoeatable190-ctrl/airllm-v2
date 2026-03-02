@@ -140,6 +140,8 @@ class AirLLMBaseModel(GenerationMixin):
         prefetching=True,
         delete_original=False,
         layer_cache_size=2,
+        rebuild_model_per_forward=False,
+        prefetch_window=2,
     ):
         _configure_runtime_once()
 
@@ -151,10 +153,12 @@ class AirLLMBaseModel(GenerationMixin):
         self.layer_cache = OrderedDict()
         self._cached_attention_mask = None
         self._cached_position_ids = None
+        self.rebuild_model_per_forward = rebuild_model_per_forward
+        self.prefetch_window = max(1, int(prefetch_window))
 
-        if compression in {'4bit', '8bit'} and not bitsandbytes_installed:
+        if compression is not None and not bitsandbytes_installed:
             raise ImportError(
-                "bitsandbytes is required for 4bit/8bit compression. "
+                "bitsandbytes is required for compression. "
                 "Install it with: pip install bitsandbytes"
             )
 
@@ -322,8 +326,7 @@ class AirLLMBaseModel(GenerationMixin):
 
         if self.prefetching and torch.cuda.is_available():
             t = time.time()
-            for v in state_dict.values():
-                v.pin_memory()
+            state_dict = {k: (v.pin_memory() if v.device.type == "cpu" else v) for k, v in state_dict.items()}
             if self.profiling_mode:
                 self.profiler.add_profiling_time('pin_memory_to_trigger_load', time.time() - t)
 
@@ -403,7 +406,7 @@ class AirLLMBaseModel(GenerationMixin):
         When prefetching is on, *future_ref* carries the already-submitted
         future.  Otherwise we load synchronously.
         """
-        if self.prefetching:
+        if self.prefetching and future_ref is not None:
             if self.profiling_mode:
                 t = time.time()
             state_dict = future_ref.result()
@@ -492,10 +495,12 @@ class AirLLMBaseModel(GenerationMixin):
             forward_start = time.process_time()
             forward_start_wall = time.time()
 
-        # Re-initialise model so buffers are clean
-        del self.model
-        clean_memory()
-        self.init_model()
+        # Optional compatibility path: rebuild model skeleton for every forward.
+        # Disabled by default because it adds substantial CPU and allocator overhead.
+        if self.rebuild_model_per_forward:
+            del self.model
+            clean_memory()
+            self.init_model()
 
         batch = [uid.to(self.running_device, non_blocking=True).unsqueeze(0) for uid in input_ids]
 
@@ -507,25 +512,31 @@ class AirLLMBaseModel(GenerationMixin):
 
         lnd = self.layer_names_dict
 
-        with torch.inference_mode(), ThreadPoolExecutor(max_workers=1) as executor:
-            future = None
+        max_workers = self.prefetch_window if self.prefetching else 1
+        with torch.inference_mode(), ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
             if self.prefetching:
-                future = executor.submit(self.load_layer_to_cpu, self.layer_names[0])
+                warmup = min(len(self.layer_names), self.prefetch_window)
+                for idx in range(warmup):
+                    futures[idx] = executor.submit(self.load_layer_to_cpu, self.layer_names[idx])
 
             for i, (layer_name, layer) in tqdm(
                 enumerate(zip(self.layer_names, self.layers)),
                 desc=f'running layers({self.running_device})',
                 total=len(self.layers),
             ):
+                future = futures.pop(i, None) if self.prefetching else None
                 moved = self._load_and_move(layer_name, executor, future)
 
-                # Kick off next layer prefetch
-                if self.prefetching and (i + 1) < len(self.layer_names):
-                    if self.profiling_mode:
-                        t = time.time()
-                    future = executor.submit(self.load_layer_to_cpu, self.layer_names[i + 1])
-                    if self.profiling_mode:
-                        self.profiler.add_profiling_time('kick_off_load_cpu', time.time() - t)
+                # Keep a small rolling prefetch window to overlap disk IO/decompression.
+                if self.prefetching:
+                    next_i = i + self.prefetch_window
+                    if next_i < len(self.layer_names) and next_i not in futures:
+                        if self.profiling_mode:
+                            t = time.time()
+                        futures[next_i] = executor.submit(self.load_layer_to_cpu, self.layer_names[next_i])
+                        if self.profiling_mode:
+                            self.profiler.add_profiling_time('kick_off_load_cpu', time.time() - t)
 
                 # Execute layer on each sequence in the batch
                 for j, seq in enumerate(batch):
