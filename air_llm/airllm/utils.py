@@ -194,13 +194,15 @@ def _remove_file_and_target(path):
 def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None,
                           splitted_model_dir_name='splitted_model',
                           compression=None, layer_names=None,
-                          delete_original=False, repo_id=None, hf_token=None):
+                          delete_original=False, repo_id=None, hf_token=None,
+                          split_cleanup_interval=8):
     """Split a sharded model checkpoint into per-layer safetensor files."""
     if compression is not None:
         assert bitsandbytes_installed, "bitsandbytes is required for compression."
         splitted_model_dir_name = f"{splitted_model_dir_name}.{compression}"
 
     checkpoint_path = Path(checkpoint_path)
+    split_cleanup_interval = max(1, int(split_cleanup_interval))
     saving_path = (
         Path(layer_shards_saving_path) / splitted_model_dir_name
         if layer_shards_saving_path
@@ -277,30 +279,33 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None,
     saving_path.mkdir(parents=True, exist_ok=True)
 
     # Precompute which tensors/files are needed per layer.
-    layer_to_keys = {layer: [k for k in index if k.startswith(layer)] for layer in layers}
-    layer_to_files = {layer: sorted(set(index[k] for k in keys)) for layer, keys in layer_to_keys.items()}
+    layer_to_file_keys = {}
+    for layer in layers:
+        file_keys = defaultdict(list)
+        for key, filename in index.items():
+            if key.startswith(layer):
+                file_keys[filename].append(key)
+        layer_to_file_keys[layer] = dict(file_keys)
 
     # Deletion safety: only remove original files once every dependent layer is persisted.
     file_refcount = defaultdict(int)
-    for files in layer_to_files.values():
-        for f in files:
+    for file_keys in layer_to_file_keys.values():
+        for f in file_keys.keys():
             file_refcount[f] += 1
 
     last_loaded_bin = None
     last_bin_state_dict = None
 
-    for layer in tqdm(layers):
-        keys = layer_to_keys[layer]
-        files = layer_to_files[layer]
+    for ilayer, layer in enumerate(tqdm(layers)):
+        file_keys = layer_to_file_keys[layer]
         layer_sd = {}
 
-        for filename in files:
+        for filename, needed_keys in file_keys.items():
             to_load = checkpoint_path / filename
             if not os.path.exists(to_load):
                 assert repo_id is not None
                 huggingface_hub.snapshot_download(repo_id, allow_patterns=os.path.basename(to_load), token=hf_token)
 
-            needed_keys = [k for k in keys if index[k] == filename]
             if safetensors_format:
                 with safe_open(str(to_load), framework='pt', device='cpu') as sf:
                     for k in needed_keys:
@@ -318,7 +323,7 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None,
             ModelPersister.get_model_persister().persist_model(layer_sd, layer, saving_path)
 
         if delete_original:
-            for filename in files:
+            for filename in file_keys.keys():
                 file_refcount[filename] -= 1
                 if file_refcount[filename] == 0:
                     _remove_file_and_target(checkpoint_path / filename)
@@ -327,7 +332,8 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None,
                         last_bin_state_dict = None
 
         del layer_sd
-        clean_memory()
+        if ((ilayer + 1) % split_cleanup_interval == 0) or (ilayer + 1 == len(layers)):
+            clean_memory()
 
     return str(saving_path)
 
