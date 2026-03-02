@@ -1,0 +1,5 @@
+bitsandbytes==0.39.0
+transformers>=4.40.0
+accelerate>=0.28.0
+einops==0.6.1
+sentencepiece==0.1.99
