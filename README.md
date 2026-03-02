@@ -98,3 +98,16 @@ air_llm/
   examples/
   tests/
 ```
+
+
+### Exemple RPi avec Qwen3.5
+
+```python
+from airllm import AutoModel
+
+model = AutoModel.from_pretrained(
+    "Qwen/Qwen3.5-4B",
+    deployment_profile="rpi5_8gb_sd",
+    compression=None,
+)
+```

@@ -1,3 +1,4 @@
+import inspect
 import importlib
 from transformers import AutoConfig
 from sys import platform
@@ -10,6 +11,8 @@ if is_on_mac_os:
 # Architecture -> (module_path, class_name) mapping
 # All trivial variants live in airllm_variants; specialised ones in their own files.
 _ARCH_REGISTRY = {
+    "Qwen3_5ForConditionalGeneration": ("airllm.airllm_variants", "AirLLMQWen2"),
+    "Qwen3ForCausalLM": ("airllm.airllm_variants", "AirLLMQWen2"),
     "Qwen2ForCausalLM": ("airllm.airllm_variants", "AirLLMQWen2"),
     "QWen":             ("airllm.airllm_qwen",     "AirLLMQWen"),
     "Baichuan":         ("airllm.airllm_baichuan",  "AirLLMBaichuan"),
@@ -50,6 +53,24 @@ def _apply_profile_defaults(kwargs):
     raise ValueError(f"Unknown deployment_profile: {profile}")
 
 
+def _filter_supported_init_kwargs(class_, kwargs):
+    """Pass only kwargs supported by target class __init__."""
+    try:
+        sig = inspect.signature(class_.__init__)
+    except (TypeError, ValueError):
+        return kwargs
+
+    # If **kwargs exists, forward all arguments.
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return kwargs
+
+    supported = {
+        name for name, p in sig.parameters.items()
+        if name != "self" and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    return {k: v for k, v in kwargs.items() if k in supported}
+
+
 
 class AutoModel:
     def __init__(self):
@@ -75,6 +96,10 @@ class AutoModel:
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *inputs, **kwargs):
+        # Defensive pop for old callers/cached installations.
+        deployment_profile = kwargs.pop("deployment_profile", None)
+        if deployment_profile is not None:
+            kwargs["deployment_profile"] = deployment_profile
         kwargs = _apply_profile_defaults(kwargs)
 
         if is_on_mac_os:
@@ -85,4 +110,5 @@ class AutoModel:
         )
         module = importlib.import_module(module_name)
         class_ = getattr(module, cls_name)
-        return class_(pretrained_model_name_or_path, *inputs, **kwargs)
+        filtered_kwargs = _filter_supported_init_kwargs(class_, kwargs)
+        return class_(pretrained_model_name_or_path, *inputs, **filtered_kwargs)

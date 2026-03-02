@@ -8,6 +8,7 @@ inherit from.
 from typing import List, Optional, Tuple, Union
 from tqdm import tqdm
 import time
+import importlib.util
 from concurrent.futures import ThreadPoolExecutor
 from collections import OrderedDict
 
@@ -30,11 +31,7 @@ try:
 except ImportError:
     _bettertransformer_available = False
 
-try:
-    import bitsandbytes as bnb
-    bitsandbytes_installed = True
-except ImportError:
-    bitsandbytes_installed = False
+bitsandbytes_installed = importlib.util.find_spec("bitsandbytes") is not None
 
 try:
     from transformers.cache_utils import Cache

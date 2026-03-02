@@ -5,6 +5,7 @@ import json
 import os
 import ctypes
 import shutil
+import importlib.util
 from tqdm import tqdm
 from pathlib import Path
 from glob import glob
@@ -20,11 +21,16 @@ from .persist import ModelPersister
 
 is_on_mac_os = platform == "darwin"
 
-try:
-    import bitsandbytes as bnb
-    bitsandbytes_installed = True
-except ImportError:
-    bitsandbytes_installed = False
+bnb = None
+bitsandbytes_installed = importlib.util.find_spec("bitsandbytes") is not None
+
+
+def _get_bnb():
+    global bnb
+    if bnb is None:
+        import bitsandbytes as _bnb
+        bnb = _bnb
+    return bnb
 
 import huggingface_hub
 
@@ -55,7 +61,8 @@ def save_quant_state_to_dict(self, packed=True):
 
     qs_packed = {k: v for k, v in qs_dict.items() if isinstance(v, torch.Tensor)}
     non_tensor = {k: v for k, v in qs_dict.items() if not isinstance(v, torch.Tensor)}
-    qs_packed[f"quant_state.bitsandbytes__{self.quant_type}"] = bnb.utils.pack_dict_to_tensor(non_tensor)
+    bnb_mod = _get_bnb()
+    qs_packed[f"quant_state.bitsandbytes__{self.quant_type}"] = bnb_mod.utils.pack_dict_to_tensor(non_tensor)
     return qs_packed
 
 
@@ -83,17 +90,19 @@ def uncompress_layer_state_dict(layer_state_dict):
         for k, v in layer_state_dict.items():
             if '4bit' not in k:
                 qs = {kk[len(k):]: kv for kk, kv in layer_state_dict.items() if kk.startswith(k) and k != kk}
-                quant_state = bnb.functional.QuantState.from_dict(qs_dict=qs, device="cuda")
-                out[k] = bnb.functional.dequantize_nf4(v.cuda(), quant_state)
+                bnb_mod = _get_bnb()
+                quant_state = bnb_mod.functional.QuantState.from_dict(qs_dict=qs, device="cuda")
+                out[k] = bnb_mod.functional.dequantize_nf4(v.cuda(), quant_state)
         return out
 
     if any('8bit' in k for k in keys):
         out = {}
         for k, v in layer_state_dict.items():
             if '8bit' not in k:
-                out[k] = bnb.functional.dequantize_blockwise(
+                bnb_mod = _get_bnb()
+                out[k] = bnb_mod.functional.dequantize_blockwise(
                     v.cuda(),
-                    bnb.functional.QuantState(
+                    bnb_mod.functional.QuantState(
                         absmax=layer_state_dict[k + ".8bit.absmax"].cuda(),
                         code=layer_state_dict[k + ".8bit.code"].cuda(),
                         blocksize=2048,
@@ -153,7 +162,8 @@ def compress_layer_state_dict(layer_state_dict, compression=None):
     if compression == '4bit':
         out = {}
         for k, v in layer_state_dict.items():
-            v_quant, quant_state = bnb.functional.quantize_nf4(v.cuda(), blocksize=64)
+            bnb_mod = _get_bnb()
+            v_quant, quant_state = bnb_mod.functional.quantize_nf4(v.cuda(), blocksize=64)
             out[k] = v_quant
             for qs_k, qs_v in save_quant_state_to_dict(quant_state).items():
                 out[f"{k}.4bit.{qs_k}"] = qs_v
@@ -162,7 +172,8 @@ def compress_layer_state_dict(layer_state_dict, compression=None):
     if compression == '8bit':
         out = {}
         for k, v in layer_state_dict.items():
-            v_quant, quant_state = bnb.functional.quantize_blockwise(v.cuda(), blocksize=2048)
+            bnb_mod = _get_bnb()
+            v_quant, quant_state = bnb_mod.functional.quantize_blockwise(v.cuda(), blocksize=2048)
             out[k] = v_quant
             out[f"{k}.8bit.absmax"] = quant_state.absmax.clone().contiguous()
             out[f"{k}.8bit.code"] = quant_state.code.clone().contiguous()
