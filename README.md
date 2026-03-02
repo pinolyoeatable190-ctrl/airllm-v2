@@ -63,22 +63,52 @@ model = AutoModel.from_pretrained(
 )
 ```
 
+
+## Profil Raspberry Pi 5 (8GB, CPU + SD)
+
+> AutoModel n'utilise plus de registry de modeles preselectionnes: tout repo Hugging Face compatible causal LM est tente via un chemin generique unique.
+
+
+Pour un usage contraint (sans GPU), utilisez le profil preconfigure :
+
+```python
+from airllm import AutoModel
+
+model = AutoModel.from_pretrained(
+    "meta-llama/Llama-3.1-8B-Instruct",
+    deployment_profile="rpi5_8gb_sd",
+)
+```
+
+Ce profil applique automatiquement des valeurs orientees faible RAM/I/O SD : CPU mode, prefetch desactive, cache couche limite, nettoyage memoire plus espace, et barres de progression desactivees.
+
 ## Structure du repository
 
 ```
 air_llm/
   airllm/
     airllm_base.py         # Moteur d'inference principal (sharded layer-by-layer)
-    airllm_variants.py     # Llama2, Mistral, Mixtral, InternLM, QWen2 (consolide)
-    airllm_qwen.py         # QWen v1 (logique specialisee)
-    airllm_chatglm.py      # ChatGLM (logique specialisee)
-    airllm_baichuan.py     # Baichuan (tokenizer specifique)
-    airllm_llama_mlx.py    # Backend MLX (macOS Apple Silicon)
-    auto_model.py           # Detection auto d'architecture + registry
+    airllm_base.py         # Moteur d'inference universel (layer-wise)
+    airllm_llama_mlx.py     # Backend MLX (macOS Apple Silicon)
+    auto_model.py           # Auto-routage universel vers moteur generique
     utils.py                # Splitting, compression, I/O
     profiler.py             # Profiling par couche
-    tokenization_baichuan.py
     persist/                # Persistance (safetensors / MLX)
   examples/
   tests/
+```
+
+
+### Exemple RPi avec Qwen3.5
+
+Qwen3.5 utilise une topologie interne `model.language_model.*` et est maintenant geree explicitement par l'auto-detection AirLLM.
+
+```python
+from airllm import AutoModel
+
+model = AutoModel.from_pretrained(
+    "Qwen/Qwen3.5-4B",
+    deployment_profile="rpi5_8gb_sd",
+    compression=None,
+)
 ```
