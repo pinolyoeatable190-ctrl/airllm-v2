@@ -142,6 +142,7 @@ class AirLLMBaseModel(GenerationMixin):
         layer_cache_size=2,
         rebuild_model_per_forward=False,
         prefetch_window=2,
+        cleanup_interval=8,
     ):
         _configure_runtime_once()
 
@@ -155,6 +156,8 @@ class AirLLMBaseModel(GenerationMixin):
         self._cached_position_ids = None
         self.rebuild_model_per_forward = rebuild_model_per_forward
         self.prefetch_window = max(1, int(prefetch_window))
+        # Run allocator cleanup periodically instead of at every layer for better throughput.
+        self.cleanup_interval = max(1, int(cleanup_interval))
 
         if compression is not None and not bitsandbytes_installed:
             raise ImportError(
@@ -399,6 +402,11 @@ class AirLLMBaseModel(GenerationMixin):
 
     # -- Forward pass -------------------------------------------------------
 
+    def _maybe_clean_memory(self, layer_idx, is_last):
+        """Periodic memory cleanup to preserve layer-wise semantics with lower overhead."""
+        if is_last or ((layer_idx + 1) % self.cleanup_interval == 0):
+            clean_memory()
+
     def _load_and_move(self, layer_name, executor, future_ref):
         """Load a layer's weights (prefetch-aware) and move them to device.
 
@@ -561,7 +569,7 @@ class AirLLMBaseModel(GenerationMixin):
                     for pn in moved:
                         set_module_tensor_to_device(self.model, pn, 'meta')
                 layer.to("meta")
-                clean_memory()
+                self._maybe_clean_memory(i, is_last=(i + 1 == len(self.layers)))
 
         logits = torch.cat(batch, 0)
 
