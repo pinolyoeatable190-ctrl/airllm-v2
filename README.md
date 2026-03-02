@@ -66,6 +66,9 @@ model = AutoModel.from_pretrained(
 
 ## Profil Raspberry Pi 5 (8GB, CPU + SD)
 
+> AutoModel n'utilise plus de registry de modeles preselectionnes: tout repo Hugging Face compatible causal LM est tente via un chemin generique unique.
+
+
 Pour un usage contraint (sans GPU), utilisez le profil preconfigure :
 
 ```python

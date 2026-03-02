@@ -23,7 +23,7 @@ from accelerate.utils.modeling import set_module_tensor_to_device
 from transformers.quantizers import AutoHfQuantizer
 
 from .profiler import LayeredProfiler
-from .utils import clean_memory, load_layer, find_or_create_local_splitted_path
+from .utils import clean_memory, load_layer, find_or_create_local_splitted_path, infer_layer_names_dict
 
 try:
     from optimum.bettertransformer import BetterTransformer
@@ -144,6 +144,7 @@ class AirLLMBaseModel(GenerationMixin):
         cpu_thread_count=None,
         cpu_interop_threads=None,
         disable_progress_bar=None,
+        layer_names_dict=None,
     ):
         _configure_runtime_once()
 
@@ -169,7 +170,7 @@ class AirLLMBaseModel(GenerationMixin):
 
         self.compression = compression
         self.hf_token = hf_token
-        self.set_layer_names_dict()
+        self.layer_names_dict = layer_names_dict or infer_layer_names_dict(model_local_path_or_repo_id, hf_token=hf_token)
 
         self.model_local_path, self.checkpoint_path = find_or_create_local_splitted_path(
             model_local_path_or_repo_id,

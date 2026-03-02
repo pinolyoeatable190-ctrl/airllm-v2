@@ -335,6 +335,57 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None,
     return str(saving_path)
 
 
+
+def infer_layer_names_dict(model_local_path_or_repo_id, hf_token=None):
+    """Infer common layer naming layout from checkpoint index without model-specific registry."""
+    p = Path(model_local_path_or_repo_id)
+    if os.path.exists(p):
+        checkpoint_path = p
+    else:
+        checkpoint_path = Path(huggingface_hub.snapshot_download(
+            model_local_path_or_repo_id, token=hf_token,
+            ignore_patterns=['*.safetensors', '*.bin'],
+        ))
+
+    if os.path.exists(checkpoint_path / 'model.safetensors.index.json'):
+        index_file = checkpoint_path / 'model.safetensors.index.json'
+    elif os.path.exists(checkpoint_path / 'pytorch_model.bin.index.json'):
+        index_file = checkpoint_path / 'pytorch_model.bin.index.json'
+    else:
+        return {
+            'embed': 'model.embed_tokens',
+            'layer_prefix': 'model.layers',
+            'norm': 'model.norm',
+            'lm_head': 'lm_head',
+        }
+
+    with open(index_file, 'rb') as f:
+        weight_map = json.load(f)['weight_map']
+
+    keys = list(weight_map.keys())
+
+    if any(k.startswith('model.language_model.layers.') for k in keys):
+        embed = 'model.language_model.embed_tokens'
+        layer_prefix = 'model.language_model.layers'
+        norm = 'model.language_model.norm'
+    elif any(k.startswith('transformer.h.') for k in keys):
+        embed = 'transformer.wte'
+        layer_prefix = 'transformer.h'
+        norm = 'transformer.ln_f'
+    else:
+        embed = 'model.embed_tokens'
+        layer_prefix = 'model.layers'
+        norm = 'model.norm'
+
+    lm_head = 'lm_head' if any(k.startswith('lm_head.') for k in keys) else 'model.lm_head'
+
+    return {
+        'embed': embed,
+        'layer_prefix': layer_prefix,
+        'norm': norm,
+        'lm_head': lm_head,
+    }
+
 def find_or_create_local_splitted_path(model_local_path_or_repo_id, layer_shards_saving_path=None,
                                        compression=None, layer_names=None, hf_token=None,
                                        delete_original=False):
