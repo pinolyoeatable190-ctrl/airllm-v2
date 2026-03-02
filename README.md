@@ -102,6 +102,8 @@ air_llm/
 
 ### Exemple RPi avec Qwen3.5
 
+Qwen3.5 utilise une topologie interne `model.language_model.*` et est maintenant geree explicitement par l'auto-detection AirLLM.
+
 ```python
 from airllm import AutoModel
 

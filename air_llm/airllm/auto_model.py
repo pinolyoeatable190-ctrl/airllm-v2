@@ -11,8 +11,8 @@ if is_on_mac_os:
 # Architecture -> (module_path, class_name) mapping
 # All trivial variants live in airllm_variants; specialised ones in their own files.
 _ARCH_REGISTRY = {
-    "Qwen3_5ForConditionalGeneration": ("airllm.airllm_variants", "AirLLMQWen2"),
-    "Qwen3ForCausalLM": ("airllm.airllm_variants", "AirLLMQWen2"),
+    "Qwen3_5ForConditionalGeneration": ("airllm.airllm_variants", "AirLLMQWen3_5"),
+    "Qwen3ForCausalLM": ("airllm.airllm_variants", "AirLLMQWen3_5"),
     "Qwen2ForCausalLM": ("airllm.airllm_variants", "AirLLMQWen2"),
     "QWen":             ("airllm.airllm_qwen",     "AirLLMQWen"),
     "Baichuan":         ("airllm.airllm_baichuan",  "AirLLMBaichuan"),

@@ -48,3 +48,21 @@ class AirLLMQWen2(AirLLMBaseModel):
 
     def get_use_better_transformer(self):
         return False
+
+
+class AirLLMQWen3_5(AirLLMBaseModel):
+    """Qwen3.5 checkpoints with nested `model.language_model.*` transformer blocks."""
+
+    def get_use_better_transformer(self):
+        return False
+
+    def get_generation_config(self):
+        return GenerationConfig()
+
+    def set_layer_names_dict(self):
+        self.layer_names_dict = {
+            'embed': 'model.language_model.embed_tokens',
+            'layer_prefix': 'model.language_model.layers',
+            'norm': 'model.language_model.norm',
+            'lm_head': 'lm_head',
+        }
